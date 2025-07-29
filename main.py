@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 from binance_api import BinanceAPI
 from position_manager import PositionManager
 from config import Config
@@ -6,6 +6,9 @@ import threading
 import time
 import logging
 import os
+from datetime import datetime, timedelta
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
 
 # Configuration du logging
 logging.basicConfig(
@@ -14,7 +17,87 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Initialisation de Flask
 app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///trading.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+
+# Modèles de base de données
+class TradingSnapshot(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    equity = db.Column(db.Float)
+    net_profit = db.Column(db.Float)
+    open_positions = db.Column(db.Integer)
+    pending_orders = db.Column(db.Integer)
+    btc_price = db.Column(db.Float)
+    
+    def __repr__(self):
+        return f'<Snapshot {self.timestamp}>'
+
+class TradeHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    symbol = db.Column(db.String(10))
+    side = db.Column(db.String(10))
+    quantity = db.Column(db.Float)
+    price = db.Column(db.Float)
+    status = db.Column(db.String(20))
+    
+    def __repr__(self):
+        return f'<Trade {self.symbol} {self.side} {self.quantity}>'
+
+# Fonctions utilitaires
+def save_snapshot(binance, position_manager):
+    """Enregistre un instantané du portefeuille"""
+    try:
+        equity = binance.get_equity()
+        net_profit = binance.get_net_profit()
+        btc_price = binance.get_current_price('BTCUSDT')
+        
+        snapshot = TradingSnapshot(
+            equity=equity,
+            net_profit=net_profit,
+            open_positions=len(position_manager.get_positions('BTCUSDT')),
+            pending_orders=len(position_manager.get_pending_orders()),
+            btc_price=btc_price
+        )
+        
+        db.session.add(snapshot)
+        db.session.commit()
+        
+        # Nettoyer les anciens snapshots (garder 7 jours)
+        week_ago = datetime.utcnow() - timedelta(days=7)
+        TradingSnapshot.query.filter(TradingSnapshot.timestamp < week_ago).delete()
+        db.session.commit()
+        
+        logger.info(f"Snapshot saved: equity={equity}, profit={net_profit}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving snapshot: {e}")
+        return False
+
+def log_trade(symbol, side, quantity, price, status):
+    """Enregistre une transaction dans l'historique"""
+    try:
+        trade = TradeHistory(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=price,
+            status=status
+        )
+        db.session.add(trade)
+        db.session.commit()
+        logger.info(f"Trade logged: {symbol} {side} {quantity} @ {price} ({status})")
+        return True
+    except Exception as e:
+        logger.error(f"Error logging trade: {e}")
+        return False
+
+# Configuration et initialisation du bot
 config = Config()
 
 # TEST: Vérifier la configuration
@@ -32,14 +115,28 @@ except Exception as e:
 position_manager = PositionManager()
 logger.info("PositionManager initialized")
 
+# Création de la base de données
+with app.app_context():
+    db.create_all()
+    logger.info("Database initialized")
+
 # Démarrer les tâches périodiques
 def start_periodic_tasks():
+    last_snapshot_time = 0
+    
     def monitor_targets():
+        nonlocal last_snapshot_time
         while True:
             try:
                 check_exit_conditions()
                 monitor_pending_orders()
                 position_manager.sync_with_exchange(binance)
+                
+                # Sauvegarder un snapshot toutes les 5 minutes
+                current_time = time.time()
+                if current_time - last_snapshot_time > 300:  # 5 minutes
+                    save_snapshot(binance, position_manager)
+                    last_snapshot_time = current_time
             except Exception as e:
                 logger.error(f"Periodic task error: {e}")
             time.sleep(60)
@@ -47,6 +144,22 @@ def start_periodic_tasks():
     thread = threading.Thread(target=monitor_targets, daemon=True)
     thread.start()
     logger.info("Periodic tasks started")
+
+def place_order(symbol, side, quantity, price, order_type='LIMIT'):
+    """Wrapper pour placer des ordres et logger les transactions"""
+    try:
+        if order_type == 'LIMIT':
+            order = binance.place_limit_order(symbol, side, quantity, price)
+        else:
+            order = binance.place_market_order(symbol, side, quantity)
+        
+        if order:
+            log_trade(symbol, side, quantity, price, 'EXECUTED')
+            return order
+    except Exception as e:
+        logger.error(f"Order placement failed: {e}")
+        log_trade(symbol, side, quantity, price, 'FAILED')
+    return None
 
 def check_exit_conditions():
     """Vérifier les conditions de sortie selon la stratégie TradingView"""
@@ -68,10 +181,12 @@ def check_exit_conditions():
             # Condition exacte de TradingView
             if unrealized_profit > 0 and current_price >= profit_target:
                 total_quantity = sum(p['quantity'] for p in positions)
-                order = binance.place_market_order(
+                order = place_order(
                     symbol=symbol,
                     side='SELL',
-                    quantity=total_quantity
+                    quantity=total_quantity,
+                    price=current_price,
+                    order_type='MARKET'
                 )
                 
                 if order:
@@ -100,11 +215,14 @@ def monitor_pending_orders():
                     order_id=order_id
                 )
                 position_manager.remove_pending_order(order_id)
+                log_trade(symbol, order['side'], order['quantity'], order['price'], 'FILLED')
             elif status in ['CANCELED', 'EXPIRED']:
                 position_manager.remove_pending_order(order_id)
+                log_trade(symbol, order['side'], order['quantity'], order['price'], status)
             elif status == 'NEW' and position_manager.is_order_old(order_id, minutes=5):
                 binance.cancel_order(symbol, order_id)
                 position_manager.remove_pending_order(order_id)
+                log_trade(symbol, order['side'], order['quantity'], order['price'], 'CANCELED')
                 
                 # Recalculer le nouveau prix d'entrée
                 last_entry = position_manager.get_last_entry_price(symbol) or binance.get_current_price(symbol)
@@ -118,7 +236,7 @@ def monitor_pending_orders():
                 )
                 
                 # Replacer l'ordre
-                new_order = binance.place_limit_order(
+                new_order = place_order(
                     symbol=symbol,
                     side='BUY',
                     quantity=quantity,
@@ -182,6 +300,7 @@ def can_open_new_position(symbol):
 def is_in_trading_window():
     """Vérifie si on est dans la fenêtre temporelle"""
     try:
+        # Mode debug: désactiver la fenêtre temporelle
         if os.getenv('DISABLE_TIMEWINDOW') == 'true':
             return True
             
@@ -191,6 +310,81 @@ def is_in_trading_window():
     except Exception as e:
         logger.error(f"Error in is_in_trading_window: {e}")
         return False
+
+# Routes
+@app.route('/')
+def home():
+    return render_template('dashboard.html')
+
+@app.route('/dashboard')
+def dashboard():
+    return render_template('dashboard.html')
+
+@app.route('/api/dashboard/data')
+def dashboard_data():
+    # Dernier snapshot
+    snapshot = TradingSnapshot.query.order_by(TradingSnapshot.timestamp.desc()).first()
+    
+    # Positions ouvertes
+    positions = []
+    for symbol in position_manager.get_symbols():
+        symbol_positions = position_manager.get_positions(symbol)
+        if symbol_positions:
+            current_price = binance.get_current_price(symbol)
+            for position in symbol_positions:
+                positions.append({
+                    'symbol': symbol,
+                    'quantity': position['quantity'],
+                    'entry_price': position['entry_price'],
+                    'current_price': current_price
+                })
+    
+    # Ordres en attente
+    orders = []
+    for order in position_manager.get_pending_orders():
+        orders.append({
+            'symbol': order['symbol'],
+            'side': order['side'],
+            'quantity': order['quantity'],
+            'price': order['price']
+        })
+    
+    # Historique des transactions (7 derniers jours)
+    trades = TradeHistory.query.filter(
+        TradeHistory.timestamp > datetime.utcnow() - timedelta(days=7)
+    ).order_by(TradeHistory.timestamp.desc()).limit(50).all()
+    
+    # Historique des performances (7 derniers jours)
+    history = TradingSnapshot.query.filter(
+        TradingSnapshot.timestamp > datetime.utcnow() - timedelta(days=7)
+    ).order_by(TradingSnapshot.timestamp.asc()).all()
+    
+    return jsonify({
+        'snapshot': {
+            'equity': snapshot.equity if snapshot else 0,
+            'net_profit': snapshot.net_profit if snapshot else 0,
+            'open_positions': snapshot.open_positions if snapshot else 0,
+            'pending_orders': snapshot.pending_orders if snapshot else 0,
+            'btc_price': snapshot.btc_price if snapshot else 0,
+            'timestamp': snapshot.timestamp.isoformat() if snapshot else ''
+        },
+        'positions': positions,
+        'orders': orders,
+        'trades': [{
+            'id': t.id,
+            'timestamp': t.timestamp.isoformat(),
+            'symbol': t.symbol,
+            'side': t.side,
+            'quantity': t.quantity,
+            'price': t.price,
+            'status': t.status
+        } for t in trades],
+        'history': [{
+            'timestamp': h.timestamp.isoformat(),
+            'equity': h.equity,
+            'net_profit': h.net_profit
+        } for h in history]
+    })
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -230,7 +424,7 @@ def webhook():
                 )
                 
                 # Valider et placer l'ordre
-                order = binance.place_limit_order(
+                order = place_order(
                     symbol=symbol,
                     side='BUY',
                     quantity=quantity,
@@ -258,10 +452,12 @@ def webhook():
                 # Condition exacte de TradingView
                 if unrealized_profit > 0:
                     total_quantity = sum(p['quantity'] for p in positions)
-                    order = binance.place_market_order(
+                    order = place_order(
                         symbol=symbol,
                         side='SELL',
-                        quantity=total_quantity
+                        quantity=total_quantity,
+                        price=current_price,
+                        order_type='MARKET'
                     )
                     
                     if order:
@@ -292,11 +488,13 @@ def health_check():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# Point d'entrée principal
 if __name__ == '__main__':
     logger.info(f"Starting bot in {'TESTNET' if config.TESTNET else 'LIVE'} mode")
     
     # Synchronisation initiale
-    position_manager.sync_with_exchange(binance)
+    with app.app_context():
+        position_manager.sync_with_exchange(binance)
     
     # Démarrer les tâches périodiques
     start_periodic_tasks()
