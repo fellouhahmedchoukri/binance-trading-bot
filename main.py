@@ -94,7 +94,8 @@ def save_snapshot(binance, position_manager):
             return True
     except Exception as e:
         logger.error(f"Error saving snapshot: {e}")
-        db.session.rollback()
+        if 'app.app_context' in locals():
+            db.session.rollback()
         return False
 
 def log_trade(symbol, side, quantity, price, status):
@@ -148,7 +149,7 @@ def start_periodic_tasks():
         nonlocal last_snapshot_time
         while True:
             try:
-                # Utiliser le contexte d'application pour toutes les opérations DB
+                # Utiliser le contexte d'application pour les opérations DB
                 with app.app_context():
                     check_exit_conditions()
                     monitor_pending_orders()
