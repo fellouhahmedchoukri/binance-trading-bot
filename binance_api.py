@@ -33,13 +33,20 @@ class BinanceAPI:
     def get_equity(self):
         """Solde total du compte en USDT"""
         balances = self.client.account()['balances']
-        usdt_balance = next((float(b['free']) + float(b['locked']) for b in balances if b['asset'] == 'USDT')
+        # CORRECTION: Parenthèse manquante ajoutée ici
+        usdt_balance = next(
+            (float(b['free']) + float(b['locked']) for b in balances if b['asset'] == 'USDT'
+        ), 0.0)
         return usdt_balance
 
     def get_net_profit(self):
         """Profit net total (implémentation simplifiée)"""
-        trades = self.client.my_trades(symbol='BTCUSDT' if self.testnet else 'BTCUSDT', limit=1000)
-        return sum(float(t['realizedPnl']) for t in trades if 'realizedPnl' in t)
+        trades = self.client.my_trades(symbol='BTCUSDT', limit=1000)
+        total_profit = 0.0
+        for trade in trades:
+            if 'realizedPnl' in trade:
+                total_profit += float(trade['realizedPnl'])
+        return total_profit
 
     def get_open_positions(self, symbol):
         """Positions ouvertes réelles depuis Binance"""
