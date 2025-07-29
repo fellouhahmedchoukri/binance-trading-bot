@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, redirect, url_for
+from flask import Flask, request, jsonify, render_template, redirect, url_for, current_app
 from binance_api import BinanceAPI
 from position_manager import PositionManager
 from config import Config
@@ -65,48 +65,52 @@ class TradeHistory(db.Model):
 def save_snapshot(binance, position_manager):
     """Enregistre un instantané du portefeuille"""
     try:
-        equity = binance.get_equity()
-        net_profit = binance.get_net_profit()
-        btc_price = binance.get_current_price('BTCUSDT')
-        
-        snapshot = TradingSnapshot(
-            equity=equity,
-            net_profit=net_profit,
-            open_positions=len(position_manager.get_positions('BTCUSDT')),
-            pending_orders=len(position_manager.get_pending_orders()),
-            btc_price=btc_price
-        )
-        
-        db.session.add(snapshot)
-        db.session.commit()
-        
-        # Nettoyer les anciens snapshots (garder 7 jours)
-        week_ago = datetime.utcnow() - timedelta(days=7)
-        TradingSnapshot.query.filter(TradingSnapshot.timestamp < week_ago).delete()
-        db.session.commit()
-        
-        logger.info(f"Snapshot saved: equity={equity}, profit={net_profit}")
-        return True
+        with app.app_context():
+            equity = binance.get_equity()
+            net_profit = binance.get_net_profit()
+            btc_price = binance.get_current_price('BTCUSDT')
+            
+            snapshot = TradingSnapshot(
+                equity=equity,
+                net_profit=net_profit,
+                open_positions=len(position_manager.get_positions('BTCUSDT')),
+                pending_orders=len(position_manager.get_pending_orders()),
+                btc_price=btc_price
+            )
+            
+            db.session.add(snapshot)
+            db.session.commit()
+            
+            # Nettoyer les anciens snapshots (garder 7 jours)
+            week_ago = datetime.utcnow() - timedelta(days=7)
+            TradingSnapshot.query.filter(TradingSnapshot.timestamp < week_ago).delete()
+            db.session.commit()
+            
+            logger.info(f"Snapshot saved: equity={equity}, profit={net_profit}")
+            return True
     except Exception as e:
         logger.error(f"Error saving snapshot: {e}")
+        db.session.rollback()
         return False
 
 def log_trade(symbol, side, quantity, price, status):
     """Enregistre une transaction dans l'historique"""
     try:
-        trade = TradeHistory(
-            symbol=symbol,
-            side=side,
-            quantity=quantity,
-            price=price,
-            status=status
-        )
-        db.session.add(trade)
-        db.session.commit()
-        logger.info(f"Trade logged: {symbol} {side} {quantity} @ {price} ({status})")
-        return True
+        with app.app_context():
+            trade = TradeHistory(
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                price=price,
+                status=status
+            )
+            db.session.add(trade)
+            db.session.commit()
+            logger.info(f"Trade logged: {symbol} {side} {quantity} @ {price} ({status})")
+            return True
     except Exception as e:
         logger.error(f"Error logging trade: {e}")
+        db.session.rollback()
         return False
 
 # Configuration et initialisation du bot
@@ -140,15 +144,17 @@ def start_periodic_tasks():
         nonlocal last_snapshot_time
         while True:
             try:
-                check_exit_conditions()
-                monitor_pending_orders()
-                position_manager.sync_with_exchange(binance)
-                
-                # Sauvegarder un snapshot toutes les 5 minutes
-                current_time = time.time()
-                if current_time - last_snapshot_time > 300:  # 5 minutes
-                    save_snapshot(binance, position_manager)
-                    last_snapshot_time = current_time
+                # Utiliser le contexte d'application pour toutes les opérations
+                with app.app_context():
+                    check_exit_conditions()
+                    monitor_pending_orders()
+                    position_manager.sync_with_exchange(binance)
+                    
+                    # Sauvegarder un snapshot toutes les 5 minutes
+                    current_time = time.time()
+                    if current_time - last_snapshot_time > 300:  # 5 minutes
+                        save_snapshot(binance, position_manager)
+                        last_snapshot_time = current_time
             except Exception as e:
                 logger.error(f"Periodic task error: {e}")
             time.sleep(60)
@@ -334,69 +340,75 @@ def dashboard():
 
 @app.route('/api/dashboard/data')
 def dashboard_data():
-    # Dernier snapshot
-    snapshot = TradingSnapshot.query.order_by(TradingSnapshot.timestamp.desc()).first()
-    
-    # Positions ouvertes
-    positions = []
-    for symbol in position_manager.get_symbols():
-        symbol_positions = position_manager.get_positions(symbol)
-        if symbol_positions:
-            current_price = binance.get_current_price(symbol)
-            for position in symbol_positions:
-                positions.append({
-                    'symbol': symbol,
-                    'quantity': position['quantity'],
-                    'entry_price': position['entry_price'],
-                    'current_price': current_price
+    try:
+        # Utiliser le contexte d'application pour toutes les opérations DB
+        with app.app_context():
+            # Dernier snapshot
+            snapshot = TradingSnapshot.query.order_by(TradingSnapshot.timestamp.desc()).first()
+            
+            # Positions ouvertes
+            positions = []
+            for symbol in position_manager.get_symbols():
+                symbol_positions = position_manager.get_positions(symbol)
+                if symbol_positions:
+                    current_price = binance.get_current_price(symbol)
+                    for position in symbol_positions:
+                        positions.append({
+                            'symbol': symbol,
+                            'quantity': position['quantity'],
+                            'entry_price': position['entry_price'],
+                            'current_price': current_price
+                        })
+            
+            # Ordres en attente
+            orders = []
+            for order in position_manager.get_pending_orders():
+                orders.append({
+                    'symbol': order['symbol'],
+                    'side': order['side'],
+                    'quantity': order['quantity'],
+                    'price': order['price']
                 })
-    
-    # Ordres en attente
-    orders = []
-    for order in position_manager.get_pending_orders():
-        orders.append({
-            'symbol': order['symbol'],
-            'side': order['side'],
-            'quantity': order['quantity'],
-            'price': order['price']
-        })
-    
-    # Historique des transactions (7 derniers jours)
-    trades = TradeHistory.query.filter(
-        TradeHistory.timestamp > datetime.utcnow() - timedelta(days=7)
-    ).order_by(TradeHistory.timestamp.desc()).limit(50).all()
-    
-    # Historique des performances (7 derniers jours)
-    history = TradingSnapshot.query.filter(
-        TradingSnapshot.timestamp > datetime.utcnow() - timedelta(days=7)
-    ).order_by(TradingSnapshot.timestamp.asc()).all()
-    
-    return jsonify({
-        'snapshot': {
-            'equity': snapshot.equity if snapshot else 0,
-            'net_profit': snapshot.net_profit if snapshot else 0,
-            'open_positions': snapshot.open_positions if snapshot else 0,
-            'pending_orders': snapshot.pending_orders if snapshot else 0,
-            'btc_price': snapshot.btc_price if snapshot else 0,
-            'timestamp': snapshot.timestamp.isoformat() if snapshot else ''
-        },
-        'positions': positions,
-        'orders': orders,
-        'trades': [{
-            'id': t.id,
-            'timestamp': t.timestamp.isoformat(),
-            'symbol': t.symbol,
-            'side': t.side,
-            'quantity': t.quantity,
-            'price': t.price,
-            'status': t.status
-        } for t in trades],
-        'history': [{
-            'timestamp': h.timestamp.isoformat(),
-            'equity': h.equity,
-            'net_profit': h.net_profit
-        } for h in history]
-    })
+            
+            # Historique des transactions (7 derniers jours)
+            trades = TradeHistory.query.filter(
+                TradeHistory.timestamp > datetime.utcnow() - timedelta(days=7)
+            ).order_by(TradeHistory.timestamp.desc()).limit(50).all()
+            
+            # Historique des performances (7 derniers jours)
+            history = TradingSnapshot.query.filter(
+                TradingSnapshot.timestamp > datetime.utcnow() - timedelta(days=7)
+            ).order_by(TradingSnapshot.timestamp.asc()).all()
+            
+            return jsonify({
+                'snapshot': {
+                    'equity': snapshot.equity if snapshot else 0,
+                    'net_profit': snapshot.net_profit if snapshot else 0,
+                    'open_positions': snapshot.open_positions if snapshot else 0,
+                    'pending_orders': snapshot.pending_orders if snapshot else 0,
+                    'btc_price': snapshot.btc_price if snapshot else 0,
+                    'timestamp': snapshot.timestamp.isoformat() if snapshot else ''
+                },
+                'positions': positions,
+                'orders': orders,
+                'trades': [{
+                    'id': t.id,
+                    'timestamp': t.timestamp.isoformat(),
+                    'symbol': t.symbol,
+                    'side': t.side,
+                    'quantity': t.quantity,
+                    'price': t.price,
+                    'status': t.status
+                } for t in trades],
+                'history': [{
+                    'timestamp': h.timestamp.isoformat(),
+                    'equity': h.equity,
+                    'net_profit': h.net_profit
+                } for h in history]
+            })
+    except Exception as e:
+        logger.error(f"Error in dashboard data: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
