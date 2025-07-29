@@ -27,7 +27,7 @@ except Exception as e:
     logger.error(f"Failed to initialize BinanceAPI: {e}")
     raise e
 
-# Initialisation du PositionManager dans le thread principal
+# Initialisation du PositionManager
 position_manager = PositionManager()
 logger.info("PositionManager initialized")
 
@@ -36,8 +36,9 @@ def start_periodic_tasks():
     def monitor_targets():
         while True:
             try:
-                check_profit_targets()
+                check_exit_conditions()
                 monitor_pending_orders()
+                position_manager.sync_with_exchange(binance)
             except Exception as e:
                 logger.error(f"Periodic task error: {e}")
             time.sleep(60)  # Vérifier toutes les minutes
@@ -46,41 +47,40 @@ def start_periodic_tasks():
     thread.start()
     logger.info("Periodic tasks started")
 
-def check_profit_targets():
-    """Vérifie si les positions atteignent le profit target"""
+def check_exit_conditions():
+    """Vérifier les conditions de sortie selon la stratégie TradingView"""
     for symbol in position_manager.get_symbols():
         try:
-            current_price = binance.get_current_price(symbol)
             positions = position_manager.get_positions(symbol)
-            
             if not positions:
                 continue
                 
+            current_price = binance.get_current_price(symbol)
+            unrealized_profit = position_manager.get_unrealized_profit(symbol, current_price)
             avg_price = position_manager.calculate_avg_price(symbol)
             profit_target = avg_price * (1 + config.PROFIT_PERCENT / 100)
             
-            logger.info(f"Checking profit for {symbol}: "
-                        f"Current: {current_price}, Target: {profit_target}")
+            logger.info(f"Exit check for {symbol}: "
+                        f"Current: {current_price}, Target: {profit_target}, "
+                        f"Unrealized P&L: {unrealized_profit}")
             
-            if current_price >= profit_target:
+            # Condition exacte de TradingView : profit > 0 et prix > target
+            if unrealized_profit > 0 and current_price >= profit_target:
                 total_quantity = sum(p['quantity'] for p in positions)
-                
-                # Fermer toute la position
-                order = binance.place_limit_order(
+                order = binance.place_market_order(
                     symbol=symbol,
                     side='SELL',
-                    quantity=total_quantity,
-                    price=profit_target
+                    quantity=total_quantity
                 )
                 
                 if order:
-                    logger.info(f"Closed all positions for {symbol} at {profit_target}")
+                    logger.info(f"Closed all positions for {symbol} at market price")
                     position_manager.remove_all_positions(symbol)
         except Exception as e:
-            logger.error(f"Error in profit check for {symbol}: {e}")
+            logger.error(f"Error in exit check for {symbol}: {e}")
 
 def monitor_pending_orders():
-    """Vérifie et met à jour les ordres en attente"""
+    """Vérifier et mettre à jour les ordres en attente"""
     try:
         orders = position_manager.get_pending_orders()
         logger.info(f"Monitoring {len(orders)} pending orders")
@@ -88,13 +88,10 @@ def monitor_pending_orders():
         for order in orders:
             symbol = order['symbol']
             order_id = order['order_id']
-            
-            # Vérifier l'état de l'ordre
             status = binance.get_order_status(symbol, order_id)
             logger.info(f"Order {order_id} status: {status}")
             
             if status == 'FILLED':
-                # Ajouter à la position
                 position_manager.add_position(
                     symbol=symbol,
                     entry_price=order['price'],
@@ -104,39 +101,37 @@ def monitor_pending_orders():
                 position_manager.remove_pending_order(order_id)
             elif status in ['CANCELED', 'EXPIRED']:
                 position_manager.remove_pending_order(order_id)
-            elif status == 'NEW':
-                # Vérifier si l'ordre est trop ancien (>5min)
-                if position_manager.is_order_old(order_id, minutes=5):
-                    binance.cancel_order(symbol, order_id)
-                    position_manager.remove_pending_order(order_id)
-                    
-                    # Recalculer nouveau prix d'entrée
-                    last_entry = position_manager.get_last_entry_price(symbol) or binance.get_current_price(symbol)
-                    new_price = last_entry * (1 - config.BELOW_PERCENT / 100) * 0.998
-                    
-                    quantity = calculate_quantity(
-                        price=new_price,
-                        order_value=config.ORDER_VALUE,
-                        min_movement=config.MIN_MOVEMENT,
-                        decimals=config.ROUNDING
-                    )
-                    
-                    # Replacer l'ordre
-                    new_order = binance.place_limit_order(
+            elif status == 'NEW' and position_manager.is_order_old(order_id, minutes=5):
+                binance.cancel_order(symbol, order_id)
+                position_manager.remove_pending_order(order_id)
+                
+                # Recalculer le nouveau prix d'entrée
+                last_entry = position_manager.get_last_entry_price(symbol) or binance.get_current_price(symbol)
+                new_price = last_entry * (1 - config.BELOW_PERCENT / 100) * 0.998
+                
+                quantity = calculate_quantity(
+                    price=new_price,
+                    order_value=config.ORDER_VALUE,
+                    min_movement=config.MIN_MOVEMENT,
+                    decimals=config.ROUNDING
+                )
+                
+                # Replacer l'ordre
+                new_order = binance.place_limit_order(
+                    symbol=symbol,
+                    side='BUY',
+                    quantity=quantity,
+                    price=new_price
+                )
+                
+                if new_order:
+                    position_manager.add_pending_order(
                         symbol=symbol,
+                        order_id=new_order['orderId'],
                         side='BUY',
-                        quantity=quantity,
-                        price=new_price
+                        price=new_price,
+                        quantity=quantity
                     )
-                    
-                    if new_order:
-                        position_manager.add_pending_order(
-                            symbol=symbol,
-                            order_id=new_order['orderId'],
-                            side='BUY',
-                            price=new_price,
-                            quantity=quantity
-                        )
     except Exception as e:
         logger.error(f"Error in order monitoring: {e}")
 
@@ -146,24 +141,35 @@ def calculate_quantity(price, order_value, min_movement, decimals):
     rounded = round(raw_qty, decimals)
     return rounded + min_movement if rounded >= raw_qty else rounded + (min_movement * 2)
 
+def calculate_pir(symbol):
+    """Calcul exact du PIR comme dans TradingView"""
+    try:
+        equity = binance.get_equity()
+        net_profit = binance.get_net_profit()
+        current_price = binance.get_current_price(symbol)
+        min_qty = config.ORDER_VALUE / current_price
+        pir = (equity + net_profit) / (min_qty * current_price)
+        return pir
+    except Exception as e:
+        logger.error(f"Error in calculate_pir: {e}")
+        return 0
+
 def can_open_new_position(symbol):
     """Vérifie si on peut ouvrir une nouvelle position"""
     try:
-        equity = binance.get_equity()
-        current_price = binance.get_current_price(symbol)
-        min_qty = config.ORDER_VALUE / current_price
-        pir = equity / (min_qty * current_price)
+        pir = calculate_pir(symbol)
         current_orders = len(position_manager.get_positions(symbol))
+        max_orders = min(pir, config.MAX_ORDERS)
         
         logger.info(f"Can open new position for {symbol}: "
-                   f"Equity: {equity}, PIR: {pir}, "
-                   f"Current orders: {current_orders}, Max orders: {config.MAX_ORDERS}")
+                   f"PIR: {pir}, Current orders: {current_orders}, "
+                   f"Max allowed: {max_orders}")
         
         # Mode debug: désactiver la limite d'ordres
         if os.getenv('DISABLE_MAX_ORDERS_CHECK') == 'true':
             return True
             
-        return current_orders < min(pir, config.MAX_ORDERS)
+        return current_orders < max_orders
     except Exception as e:
         logger.error(f"Error in can_open_new_position: {e}")
         return False
@@ -171,7 +177,6 @@ def can_open_new_position(symbol):
 def is_in_trading_window():
     """Vérifie si on est dans la fenêtre temporelle"""
     try:
-        # Mode debug: désactiver la fenêtre temporelle
         if os.getenv('DISABLE_TIMEWINDOW') == 'true':
             return True
             
@@ -187,44 +192,30 @@ def webhook():
     try:
         data = request.json
         
-        # ===== SECTION DE SÉCURITÉ CORRIGÉE =====
+        # Vérification de sécurité
         expected_token = os.getenv('WEBHOOK_TOKEN')
-        if expected_token:
-            if data.get('token') != expected_token:
-                logger.error("Invalid webhook token received")
-                return jsonify({"status": "error", "message": "Invalid token"}), 401
-        # ===== FIN DE CORRECTION =====
+        if expected_token and data.get('token') != expected_token:
+            logger.error("Invalid webhook token received")
+            return jsonify({"status": "error", "message": "Invalid token"}), 401
         
-        symbol = data.get('symbol', 'UNKNOWN')
-        logger.info(f"Received signal: {data}")
-        
-        # Debug: log de la configuration
-        logger.info(f"Config: ORDER_VALUE={config.ORDER_VALUE}, "
-                   f"BELOW_PERCENT={config.BELOW_PERCENT}%, "
-                   f"PROFIT_PERCENT={config.PROFIT_PERCENT}%")
+        symbol = data.get('symbol', 'UNKNOWN').upper()
+        action = data.get('action')
+        logger.info(f"Received {action} signal for {symbol}: {data}")
         
         # Traitement des signaux d'achat
-        if data['action'] == 'buy' and is_in_trading_window():
-            symbol = data['symbol']
+        if action == 'buy' and is_in_trading_window():
             signal_price = float(data['price'])
-            
             last_entry = position_manager.get_last_entry_price(symbol)
             
-            # Debug: log des informations critiques
-            logger.info(f"Strategy check for {symbol}:")
-            logger.info(f"- Trading window active: {is_in_trading_window()}")
-            logger.info(f"- Last entry price: {last_entry}")
-            logger.info(f"- Can open new position: {can_open_new_position(symbol)}")
+            # Calcul du prochain prix d'entrée
+            next_price = last_entry * (1 - config.BELOW_PERCENT / 100) if last_entry else signal_price
             
-            if last_entry is None:
-                next_price = signal_price
-                logger.info(f"- First position, using signal price: {next_price}")
-            else:
-                next_price = last_entry * (1 - config.BELOW_PERCENT / 100)
-                logger.info(f"- Existing position, next entry price: {next_price}")
+            logger.info(f"Buy signal conditions: "
+                       f"Signal price: {signal_price}, "
+                       f"Next entry: {next_price}, "
+                       f"Can open: {can_open_new_position(symbol)}")
             
-            logger.info(f"- Signal price: {signal_price} vs Next entry price: {next_price}")
-            
+            # Condition exacte de TradingView
             if signal_price <= next_price and can_open_new_position(symbol):
                 quantity = calculate_quantity(
                     price=next_price,
@@ -233,62 +224,47 @@ def webhook():
                     decimals=config.ROUNDING
                 )
                 
-                # Valider l'ordre
-                quantity, price = binance.validate_order(symbol, quantity, next_price)
-                
-                # Placer l'ordre limite
+                # Valider et placer l'ordre
                 order = binance.place_limit_order(
                     symbol=symbol,
                     side='BUY',
                     quantity=quantity,
-                    price=price
+                    price=next_price
                 )
                 
                 if order:
-                    logger.info(f"Order placed successfully: {order}")
+                    logger.info(f"Buy order placed: {order}")
                     position_manager.add_pending_order(
                         symbol=symbol,
                         order_id=order['orderId'],
                         side='BUY',
-                        price=price,
+                        price=next_price,
                         quantity=quantity
                     )
-                    
-                    # TEST: Vérifier l'ordre sur Binance
-                    if config.TESTNET:
-                        try:
-                            order_status = binance.client.get_order(
-                                symbol=symbol,
-                                orderId=order['orderId']
-                            )
-                            logger.info(f"Testnet order status: {order_status}")
-                        except Exception as e:
-                            logger.error(f"Failed to get order status: {e}")
-                    
                     return jsonify({"status": "success", "order_id": order['orderId']})
         
-        # Traitement des signaux de vente (nouveau code)
-        elif data['action'] == 'sell':
-            symbol = data['symbol']
+        # Traitement des signaux de vente
+        elif action == 'sell':
             positions = position_manager.get_positions(symbol)
-            
             if positions:
-                total_quantity = sum(p['quantity'] for p in positions)
+                current_price = binance.get_current_price(symbol)
+                unrealized_profit = position_manager.get_unrealized_profit(symbol, current_price)
                 
-                # Placer un ordre de vente au marché
-                order = binance.place_market_order(
-                    symbol=symbol,
-                    side='SELL',
-                    quantity=total_quantity
-                )
-                
-                if order:
-                    logger.info(f"Sold all positions for {symbol} via webhook: {order}")
-                    position_manager.remove_all_positions(symbol)
-                    return jsonify({"status": "sold", "quantity": total_quantity})
+                # Condition exacte de TradingView
+                if unrealized_profit > 0:
+                    total_quantity = sum(p['quantity'] for p in positions)
+                    order = binance.place_market_order(
+                        symbol=symbol,
+                        side='SELL',
+                        quantity=total_quantity
+                    )
+                    
+                    if order:
+                        logger.info(f"Sold all positions via webhook: {order}")
+                        position_manager.remove_all_positions(symbol)
+                        return jsonify({"status": "sold", "quantity": total_quantity})
             else:
                 logger.info(f"No positions to sell for {symbol}")
-                return jsonify({"status": "ignored", "message": "No positions to sell"})
         
         return jsonify({"status": "ignored"})
     
@@ -298,36 +274,27 @@ def webhook():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    # Vérifier la connexion à Binance
     try:
         price = binance.get_current_price('BTCUSDT')
+        positions = position_manager.get_positions('BTCUSDT')
         return jsonify({
             "status": "ok",
-            "message": "Bot is running",
-            "testnet_mode": config.TESTNET,
-            "btc_price": price
+            "testnet": config.TESTNET,
+            "btc_price": price,
+            "open_positions": len(positions),
+            "pending_orders": len(position_manager.get_pending_orders())
         })
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
-    # Test initial
-    logger.info(f"Starting application in {'TESTNET' if config.TESTNET else 'MAINNET'} mode")
-    logger.info(f"Binance API URL: {binance.client.API_URL}")
+    logger.info(f"Starting bot in {'TESTNET' if config.TESTNET else 'LIVE'} mode")
     
-    # Vérifier la connexion
-    try:
-        btc_price = binance.get_current_price('BTCUSDT')
-        logger.info(f"BTC/USDT price: {btc_price}")
-        
-        # Vérifier le solde USDT
-        balance = binance.client.get_asset_balance(asset='USDT')
-        logger.info(f"USDT Balance: {balance}")
-    except Exception as e:
-        logger.error(f"Initial connection failed: {e}")
+    # Synchronisation initiale
+    position_manager.sync_with_exchange(binance)
     
+    # Démarrer les tâches périodiques
     start_periodic_tasks()
-    app.run(host='0.0.0.0', port=5000)
+    
+    # Démarrer le serveur Flask
+    app.run(host='0.0.0.0', port=5000, use_reloader=False)
