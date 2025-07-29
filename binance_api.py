@@ -1,4 +1,5 @@
-from binance import Client, BinanceAPIException
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
 import logging
 import math
 
@@ -22,6 +23,8 @@ class BinanceAPI:
         except BinanceAPIException as e:
             self.logger.error(f"Order failed: {e}")
             return None
+    
+    # Le reste du code reste inchangé...
     
     def cancel_order(self, symbol, order_id):
         try:
