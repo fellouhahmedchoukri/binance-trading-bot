@@ -68,13 +68,17 @@ class BinanceAPI:
             return 0.0
 
     def get_equity(self):
-        # Implémentez cette méthode
+        # Implémentation simplifiée pour l'exemple
         return 10000.0
 
     def get_net_profit(self):
-        # Implémentez cette méthode
+        # Implémentation simplifiée pour l'exemple
         return 500.0
 
     def get_positions(self):
-        # Implémentez cette méthode
+        # Implémentation simplifiée pour l'exemple
         return {}
+
+    def get_open_orders(self):
+        # Implémentation simplifiée pour l'exemple
+        return []
