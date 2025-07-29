@@ -36,43 +36,49 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 
-# Configuration et initialisation du bot
-config = Config()
+# Modèles de base de données
+class TradingSnapshot(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    equity = db.Column(db.Float)
+    net_profit = db.Column(db.Float)
+    open_positions = db.Column(db.Integer)
+    pending_orders = db.Column(db.Integer)
+    btc_price = db.Column(db.Float)
+    
+    def __repr__(self):
+        return f'<Snapshot {self.timestamp}>'
 
-# TEST: Vérifier la configuration
-logger.info(f"Configuration TESTNET: {config.TESTNET}")
-
-try:
-    binance = BinanceAPI(config.API_KEY, config.SECRET_KEY, testnet=config.TESTNET)
-    logger.info(f"Binance API initialized successfully for {'TESTNET' if config.TESTNET else 'MAINNET'}")
-    logger.info(f"Binance API URL: {binance.client.base_url}")
-except Exception as e:
-    logger.error(f"Failed to initialize BinanceAPI: {e}")
-    raise e
-
-# Initialisation du PositionManager
-position_manager = PositionManager()
-logger.info("PositionManager initialized")
-
-# Création de la base de données
-with app.app_context():
-    db.create_all()
-    logger.info("Database initialized")
+class TradeHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    symbol = db.Column(db.String(10))
+    side = db.Column(db.String(10))
+    quantity = db.Column(db.Float)
+    price = db.Column(db.Float)
+    status = db.Column(db.String(20))
+    
+    def __repr__(self):
+        return f'<Trade {self.symbol} {self.side} {self.quantity}>'
 
 # Fonctions utilitaires
 def save_snapshot(binance, position_manager):
     """Enregistre un instantané du portefeuille"""
     try:
+        # Récupérer les données nécessaires AVANT le contexte
+        equity = binance.get_equity()
+        net_profit = binance.get_net_profit()
+        btc_price = binance.get_current_price('BTCUSDT')
+        open_positions = len(position_manager.get_positions('BTCUSDT'))
+        pending_orders = len(position_manager.get_pending_orders())
+        
+        # Utiliser le contexte d'application pour les opérations DB
         with app.app_context():
-            equity = binance.get_equity()
-            net_profit = binance.get_net_profit()
-            btc_price = binance.get_current_price('BTCUSDT')
-            
             snapshot = TradingSnapshot(
                 equity=equity,
                 net_profit=net_profit,
-                open_positions=len(position_manager.get_positions('BTCUSDT')),
-                pending_orders=len(position_manager.get_pending_orders()),
+                open_positions=open_positions,
+                pending_orders=pending_orders,
                 btc_price=btc_price
             )
             
@@ -111,6 +117,29 @@ def log_trade(symbol, side, quantity, price, status):
         db.session.rollback()
         return False
 
+# Configuration et initialisation du bot
+config = Config()
+
+# TEST: Vérifier la configuration
+logger.info(f"Configuration TESTNET: {config.TESTNET}")
+
+try:
+    binance = BinanceAPI(config.API_KEY, config.SECRET_KEY, testnet=config.TESTNET)
+    logger.info(f"Binance API initialized successfully for {'TESTNET' if config.TESTNET else 'MAINNET'}")
+    logger.info(f"Binance API URL: {binance.client.base_url}")
+except Exception as e:
+    logger.error(f"Failed to initialize BinanceAPI: {e}")
+    raise e
+
+# Initialisation du PositionManager
+position_manager = PositionManager()
+logger.info("PositionManager initialized")
+
+# Création de la base de données
+with app.app_context():
+    db.create_all()
+    logger.info("Database initialized")
+
 # Démarrer les tâches périodiques
 def start_periodic_tasks():
     last_snapshot_time = 0
@@ -119,17 +148,17 @@ def start_periodic_tasks():
         nonlocal last_snapshot_time
         while True:
             try:
-                # Utiliser le contexte d'application pour toutes les opérations
+                # Utiliser le contexte d'application pour toutes les opérations DB
                 with app.app_context():
                     check_exit_conditions()
                     monitor_pending_orders()
                     position_manager.sync_with_exchange(binance)
-                    
-                    # Sauvegarder un snapshot toutes les 5 minutes
-                    current_time = time.time()
-                    if current_time - last_snapshot_time > 300:  # 5 minutes
-                        save_snapshot(binance, position_manager)
-                        last_snapshot_time = current_time
+                
+                # Sauvegarder un snapshot toutes les 5 minutes
+                current_time = time.time()
+                if current_time - last_snapshot_time > 300:  # 5 minutes
+                    save_snapshot(binance, position_manager)
+                    last_snapshot_time = current_time
             except Exception as e:
                 logger.error(f"Periodic task error: {e}")
             time.sleep(60)
