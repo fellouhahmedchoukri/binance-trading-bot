@@ -1,7 +1,6 @@
 flask
 flask_sqlalchemy
-flask_migrate
 python-dotenv
-binance-connector
+apscheduler
+python-binance
 gunicorn
-psycopg2-binary
