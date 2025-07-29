@@ -1,122 +1,98 @@
+import os
+import logging
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
+from flask import current_app
+from models import db, Position, Trade, Snapshot
 import time
 
 class PositionManager:
-    def __init__(self):
-        self.positions = {}
-        self.pending_orders = []
-        self.last_sync = 0
+    def __init__(self, app, testnet=True):
+        self.app = app
+        self.testnet = testnet
+        self.client = self.initialize_binance_client()
+        logging.info("PositionManager initialized")
 
-    # Méthode de compatibilité pour les tests Docker
-    def get_connection(self):
-        """Méthode factice pour passer les tests de build"""
-        print("PositionManager compatibility check passed")
-        return True
+    def initialize_binance_client(self):
+        api_key = os.getenv('BINANCE_API_KEY')
+        api_secret = os.getenv('BINANCE_API_SECRET')
+        client = Client(
+            api_key=api_key,
+            api_secret=api_secret,
+            testnet=self.testnet
+        )
+        logging.info(f"Binance API initialized successfully for {'TESTNET' if self.testnet else 'PRODUCTION'}")
+        logging.info(f"Binance API URL: {client.API_URL}")
+        return client
 
-    def sync_with_exchange(self, binance_api):
-        """Synchroniser les positions avec Binance"""
-        if time.time() - self.last_sync < 60:  # Synchroniser max 1x/min
-            return
+    def execute_trade(self, symbol, side, quantity):
+        try:
+            # Créer un ordre
+            order = self.client.create_order(
+                symbol=symbol,
+                side=side.upper(),
+                type='MARKET',
+                quantity=quantity
+            )
             
-        self.last_sync = time.time()
-        symbols = list(self.positions.keys()) + [order['symbol'] for order in self.pending_orders]
+            # Enregistrer le trade dans la base de données
+            with self.app.app_context():
+                trade = Trade(
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=float(order['fills'][0]['price']),
+                    status=order['status']
+                )
+                db.session.add(trade)
+                db.session.commit()
+            
+            logging.info(f"Trade executed: {side} {quantity} {symbol}")
+            return order
         
-        for symbol in set(symbols):
-            real_positions = binance_api.get_open_positions(symbol)
+        except BinanceAPIException as e:
+            logging.error(f"Binance API error: {e.message}")
+            raise
+        except Exception as e:
+            logging.error(f"Trade execution error: {str(e)}")
+            raise
+
+    def save_snapshot(self):
+        try:
+            # Récupérer les données nécessaires
+            account = self.client.get_account()
+            positions = Position.query.all()
             
-            # Mettre à jour les positions
-            self.positions[symbol] = real_positions
+            # Créer un snapshot
+            snapshot = Snapshot(
+                total_balance=float(account['totalWalletBalance']),
+                available_balance=float(account['availableBalance']),
+                positions_count=len(positions)
+            )
             
-            # Nettoyer les ordres en attente remplis
-            for order in self.pending_orders[:]:
-                status = binance_api.get_order_status(symbol, order['order_id'])
-                if status == 'FILLED':
-                    self.add_position(
-                        symbol=symbol,
-                        entry_price=order['price'],
-                        quantity=order['quantity'],
-                        order_id=order['order_id']
-                    )
-                    self.pending_orders.remove(order)
-                elif status in ['CANCELED', 'EXPIRED', 'REJECTED']:
-                    self.pending_orders.remove(order)
-
-    def add_position(self, symbol, entry_price, quantity, order_id):
-        """Ajouter une nouvelle position"""
-        if symbol not in self.positions:
-            self.positions[symbol] = []
+            # Sauvegarder dans la base de données
+            with self.app.app_context():
+                db.session.add(snapshot)
+                db.session.commit()
             
-        self.positions[symbol].append({
-            'entry_price': entry_price,
-            'quantity': quantity,
-            'order_id': order_id,
-            'timestamp': time.time()
-        })
-
-    def remove_all_positions(self, symbol):
-        """Supprimer toutes les positions d'un symbole"""
-        if symbol in self.positions:
-            del self.positions[symbol]
-
-    def calculate_avg_price(self, symbol):
-        """Calculer le prix moyen d'entrée"""
-        if symbol not in self.positions or not self.positions[symbol]:
-            return None
+            logging.info("Snapshot saved successfully")
             
-        total_value = 0
-        total_quantity = 0
-        
-        for position in self.positions[symbol]:
-            total_value += position['entry_price'] * position['quantity']
-            total_quantity += position['quantity']
+        except Exception as e:
+            logging.error(f"Error saving snapshot: {str(e)}")
+            with self.app.app_context():
+                db.session.rollback()
+
+    def monitor_pending_orders(self):
+        try:
+            # Récupérer les ordres en attente
+            orders = self.client.get_open_orders()
             
-        return total_value / total_quantity if total_quantity > 0 else 0
-
-    def get_unrealized_profit(self, symbol, current_price):
-        """Calculer le profit non réalisé"""
-        avg_price = self.calculate_avg_price(symbol)
-        if avg_price is None:
-            return 0
+            # Logique de surveillance
+            for order in orders:
+                # Votre logique de traitement des ordres en attente
+                logging.info(f"Monitoring order: {order['symbol']} {order['side']} {order['quantity']}")
+                
+            logging.info(f"Monitoring {len(orders)} pending orders")
             
-        total_quantity = sum(p['quantity'] for p in self.positions[symbol])
-        return (current_price - avg_price) * total_quantity
-
-    def add_pending_order(self, symbol, order_id, side, price, quantity):
-        """Ajouter un ordre en attente"""
-        self.pending_orders.append({
-            'symbol': symbol,
-            'order_id': order_id,
-            'side': side,
-            'price': price,
-            'quantity': quantity,
-            'timestamp': time.time()
-        })
-
-    def remove_pending_order(self, order_id):
-        """Supprimer un ordre en attente"""
-        self.pending_orders = [o for o in self.pending_orders if o['order_id'] != order_id]
-
-    def is_order_old(self, order_id, minutes=5):
-        """Vérifier si un ordre est trop ancien"""
-        for order in self.pending_orders:
-            if order['order_id'] == order_id:
-                return time.time() - order['timestamp'] > minutes * 60
-        return False
-
-    def get_symbols(self):
-        """Obtenir tous les symboles avec positions"""
-        return list(self.positions.keys())
-
-    def get_positions(self, symbol):
-        """Obtenir les positions pour un symbole"""
-        return self.positions.get(symbol, [])
-
-    def get_pending_orders(self):
-        """Obtenir tous les ordres en attente"""
-        return self.pending_orders.copy()
-
-    def get_last_entry_price(self, symbol):
-        """Obtenir le dernier prix d'entrée"""
-        positions = self.get_positions(symbol)
-        if not positions:
-            return None
-        return positions[-1]['entry_price']
+        except Exception as e:
+            logging.error(f"Error monitoring orders: {str(e)}")
