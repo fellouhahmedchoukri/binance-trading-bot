@@ -1,9 +1,5 @@
 import os
 import logging
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
-from flask import current_app
-from models import TradingSnapshot, TradeHistory  # Modifié l'import
 import time
 
 class PositionManager:
