@@ -1,130 +1,139 @@
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
-import logging
-import math
+from binance.spot import Spot
+from binance.error import ClientError
+import time
 
 class BinanceAPI:
-    def __init__(self, api_key, api_secret, testnet=True):
-        """Initialise la connexion à l'API Binance.
-        
-        Args:
-            api_key (str): Clé API Binance
-            api_secret (str): Clé secrète Binance
-            testnet (bool): Utiliser le testnet (True par défaut)
-        """
+    def __init__(self, api_key, secret_key, testnet=False):
         self.testnet = testnet
-        self.logger = logging.getLogger(__name__)
+        base_url = "https://testnet.binance.vision" if testnet else "https://api.binance.com"
+        self.client = Spot(api_key=api_key, api_secret=secret_key, base_url=base_url)
+        self.exchange_info = {}
+        self.last_sync = 0
+        self.refresh_exchange_info()
+
+    def refresh_exchange_info(self):
+        """Actualiser les informations d'échange toutes les 10 minutes"""
+        if time.time() - self.last_sync > 600:
+            self.exchange_info = self.client.exchange_info()
+            self.last_sync = time.time()
+
+    def get_symbol_info(self, symbol):
+        """Obtenir les règles spécifiques au symbole"""
+        self.refresh_exchange_info()
+        for s in self.exchange_info['symbols']:
+            if s['symbol'] == symbol:
+                return s
+        return None
+
+    def get_current_price(self, symbol):
+        """Prix actuel du marché"""
+        ticker = self.client.ticker_price(symbol)
+        return float(ticker['price'])
+
+    def get_equity(self):
+        """Solde total du compte en USDT"""
+        balances = self.client.account()['balances']
+        usdt_balance = next((float(b['free']) + float(b['locked']) for b in balances if b['asset'] == 'USDT')
+        return usdt_balance
+
+    def get_net_profit(self):
+        """Profit net total (implémentation simplifiée)"""
+        trades = self.client.my_trades(symbol='BTCUSDT' if self.testnet else 'BTCUSDT', limit=1000)
+        return sum(float(t['realizedPnl']) for t in trades if 'realizedPnl' in t)
+
+    def get_open_positions(self, symbol):
+        """Positions ouvertes réelles depuis Binance"""
+        positions = []
+        orders = self.client.get_orders(symbol=symbol, limit=100)
         
-        if testnet:
-            self.logger.info("Initializing Binance TESTNET API")
-            self.client = Client(api_key, api_secret, testnet=True)
-        else:
-            self.logger.info("Initializing Binance MAINNET API")
-            self.client = Client(api_key, api_secret)
-    
+        for order in orders:
+            if order['status'] == 'FILLED' and order['side'] == 'BUY':
+                positions.append({
+                    'symbol': symbol,
+                    'entry_price': float(order['price']),
+                    'quantity': float(order['executedQty']),
+                    'order_id': order['orderId']
+                })
+        return positions
+
     def place_limit_order(self, symbol, side, quantity, price):
+        """Passer un ordre limite avec validation des règles"""
+        symbol_info = self.get_symbol_info(symbol)
+        if not symbol_info:
+            return None
+
+        # Validation du prix
+        price_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER')
+        tick_size = float(price_filter['tickSize'])
+        price = round(price / tick_size) * tick_size
+
+        # Validation de la quantité
+        lot_size = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
+        min_qty = float(lot_size['minQty'])
+        step_size = float(lot_size['stepSize'])
+        quantity = max(min_qty, quantity)
+        quantity = round(quantity / step_size) * step_size
+
         try:
-            order = self.client.create_order(
+            order = self.client.new_order(
                 symbol=symbol,
                 side=side,
-                type=Client.ORDER_TYPE_LIMIT,
-                timeInForce=Client.TIME_IN_FORCE_GTC,
-                quantity=self.format_quantity(symbol, quantity),
-                price=self.format_price(symbol, price)
+                type='LIMIT',
+                timeInForce='GTC',
+                quantity=quantity,
+                price=price
             )
-            self.logger.info(f"Order placed: {order}")
             return order
-        except BinanceAPIException as e:
-            self.logger.error(f"Order failed: {e}")
+        except ClientError as e:
+            print(f"Order placement failed: {e.error_message}")
             return None
-    
-    def cancel_order(self, symbol, order_id):
+
+    def place_market_order(self, symbol, side, quantity):
+        """Passer un ordre au marché"""
+        symbol_info = self.get_symbol_info(symbol)
+        if not symbol_info:
+            return None
+
+        # Validation de la quantité
+        lot_size = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
+        min_qty = float(lot_size['minQty'])
+        step_size = float(lot_size['stepSize'])
+        quantity = max(min_qty, quantity)
+        quantity = round(quantity / step_size) * step_size
+
         try:
-            result = self.client.cancel_order(symbol=symbol, orderId=order_id)
-            self.logger.info(f"Order canceled: {result}")
-            return result
-        except BinanceAPIException as e:
-            self.logger.error(f"Cancel failed: {e}")
+            order = self.client.new_order(
+                symbol=symbol,
+                side=side,
+                type='MARKET',
+                quantity=quantity
+            )
+            return order
+        except ClientError as e:
+            print(f"Market order failed: {e.error_message}")
             return None
-    
+
     def get_order_status(self, symbol, order_id):
+        """Statut d'un ordre spécifique"""
         try:
             order = self.client.get_order(symbol=symbol, orderId=order_id)
             return order['status']
-        except BinanceAPIException as e:
-            self.logger.error(f"Order status check failed: {e}")
+        except ClientError:
             return 'UNKNOWN'
-    
-    def get_current_price(self, symbol):
+
+    def cancel_order(self, symbol, order_id):
+        """Annuler un ordre"""
         try:
-            ticker = self.client.get_symbol_ticker(symbol=symbol)
-            return float(ticker['price'])
-        except BinanceAPIException as e:
-            self.logger.error(f"Price check failed: {e}")
-            return None
-    
-    def get_symbol_info(self, symbol):
-        try:
-            info = self.client.get_symbol_info(symbol)
-            return info
-        except BinanceAPIException as e:
-            self.logger.error(f"Symbol info failed: {e}")
-            return None
-    
-    def get_equity(self):
-        try:
-            balance = self.client.get_asset_balance(asset='USDT')
-            return float(balance['free'])
-        except BinanceAPIException as e:
-            self.logger.error(f"Balance check failed: {e}")
-            return 0.0
-    
-    def validate_order(self, symbol, quantity, price):
-        """Valide les paramètres avec les règles Binance"""
-        info = self.get_symbol_info(symbol)
-        if not info:
-            return quantity, price
-        
-        # Filtre de quantité
-        lot_size = next(f for f in info['filters'] if f['filterType'] == 'LOT_SIZE')
-        min_qty = float(lot_size['minQty'])
-        max_qty = float(lot_size['maxQty'])
-        step_size = float(lot_size['stepSize'])
-        
-        quantity = max(min_qty, min(quantity, max_qty))
-        quantity = math.floor(quantity / step_size) * step_size
-        quantity = round(quantity, 8)
-        
-        # Filtre de prix
-        price_filter = next(f for f in info['filters'] if f['filterType'] == 'PRICE_FILTER')
-        min_price = float(price_filter['minPrice'])
-        max_price = float(price_filter['maxPrice'])
-        tick_size = float(price_filter['tickSize'])
-        
-        price = max(min_price, min(price, max_price))
-        price = math.floor(price / tick_size) * tick_size
-        price = round(price, 8)
-        
-        return quantity, price
-    
-    def format_quantity(self, symbol, quantity):
-        """Formate la quantité selon les règles du symbol"""
-        info = self.get_symbol_info(symbol)
-        if not info:
-            return quantity
-        
-        lot_size = next(f for f in info['filters'] if f['filterType'] == 'LOT_SIZE')
-        step_size = float(lot_size['stepSize'])
-        precision = int(round(-math.log(step_size, 10), 0))
-        return round(quantity, precision)
-    
-    def format_price(self, symbol, price):
-        """Formate le prix selon les règles du symbol"""
-        info = self.get_symbol_info(symbol)
-        if not info:
-            return price
-        
-        price_filter = next(f for f in info['filters'] if f['filterType'] == 'PRICE_FILTER')
-        tick_size = float(price_filter['tickSize'])
-        precision = int(round(-math.log(tick_size, 10), 0))
-        return round(price, precision)
+            self.client.cancel_order(symbol=symbol, orderId=order_id)
+            return True
+        except ClientError:
+            return False
+
+    def close_all_positions(self, symbol):
+        """Fermer toutes les positions pour un symbole"""
+        positions = self.get_open_positions(symbol)
+        if not positions:
+            return False
+            
+        total_quantity = sum(p['quantity'] for p in positions)
+        return self.place_market_order(symbol, 'SELL', total_quantity)
