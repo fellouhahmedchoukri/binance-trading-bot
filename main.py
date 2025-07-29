@@ -203,6 +203,7 @@ def webhook():
                    f"BELOW_PERCENT={config.BELOW_PERCENT}%, "
                    f"PROFIT_PERCENT={config.PROFIT_PERCENT}%")
         
+        # Traitement des signaux d'achat
         if data['action'] == 'buy' and is_in_trading_window():
             symbol = data['symbol']
             signal_price = float(data['price'])
@@ -265,6 +266,29 @@ def webhook():
                             logger.error(f"Failed to get order status: {e}")
                     
                     return jsonify({"status": "success", "order_id": order['orderId']})
+        
+        # Traitement des signaux de vente (nouveau code)
+        elif data['action'] == 'sell':
+            symbol = data['symbol']
+            positions = position_manager.get_positions(symbol)
+            
+            if positions:
+                total_quantity = sum(p['quantity'] for p in positions)
+                
+                # Placer un ordre de vente au marché
+                order = binance.place_market_order(
+                    symbol=symbol,
+                    side='SELL',
+                    quantity=total_quantity
+                )
+                
+                if order:
+                    logger.info(f"Sold all positions for {symbol} via webhook: {order}")
+                    position_manager.remove_all_positions(symbol)
+                    return jsonify({"status": "sold", "quantity": total_quantity})
+            else:
+                logger.info(f"No positions to sell for {symbol}")
+                return jsonify({"status": "ignored", "message": "No positions to sell"})
         
         return jsonify({"status": "ignored"})
     
