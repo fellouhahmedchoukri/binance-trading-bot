@@ -185,12 +185,15 @@ def is_in_trading_window():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.jsonwebhook_token = os.getenv('WEBHOOK_TOKEN')
-        if webhook_token:  # Seulement si le token est configuré
-            if data.get('token') != webhook_token:
+        data = request.json
+        
+        # ===== SECTION DE SÉCURITÉ CORRIGÉE =====
+        expected_token = os.getenv('WEBHOOK_TOKEN')
+        if expected_token:
+            if data.get('token') != expected_token:
                 logger.error("Invalid webhook token received")
                 return jsonify({"status": "error", "message": "Invalid token"}), 401
-        
+        # ===== FIN DE CORRECTION =====
         
         symbol = data.get('symbol', 'UNKNOWN')
         logger.info(f"Received signal: {data}")
