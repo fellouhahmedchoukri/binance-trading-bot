@@ -31,10 +31,10 @@ class PositionManager:
                 status = binance_api.get_order_status(symbol, order['order_id'])
                 if status == 'FILLED':
                     self.add_position(
-                        symbol,
-                        order['price'],
-                        order['quantity'],
-                        order['order_id']
+                        symbol=symbol,
+                        entry_price=order['price'],
+                        quantity=order['quantity'],
+                        order_id=order['order_id']
                     )
                     self.pending_orders.remove(order)
                 elif status in ['CANCELED', 'EXPIRED', 'REJECTED']:
