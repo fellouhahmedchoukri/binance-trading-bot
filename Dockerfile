@@ -21,3 +21,11 @@ ENV FLASK_RUN_PORT=5000
 RUN python -c "from position_manager import PositionManager; PositionManager()"
 
 CMD ["flask", "run"]
+
+# Dockerfile
+# ...
+
+# Initialize database
+RUN python -c "from position_manager import PositionManager; pm = PositionManager(); pm.get_connection()"
+
+CMD ["flask", "run", "--host=0.0.0.0", "--port=5000"]
