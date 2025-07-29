@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, redirect, url_for
 from binance_api import BinanceAPI
 from position_manager import PositionManager
 from config import Config
@@ -9,6 +9,7 @@ import os
 from datetime import datetime, timedelta
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
+import urllib.parse
 
 # Configuration du logging
 logging.basicConfig(
@@ -18,8 +19,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialisation de Flask
-app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///trading.db'
+app = Flask(__name__, template_folder='templates', static_folder='static')
+
+# Configuration de la base de données
+if 'DATABASE_URL' in os.environ:
+    db_uri = os.environ['DATABASE_URL']
+    if db_uri.startswith("postgres://"):
+        db_uri = db_uri.replace("postgres://", "postgresql://", 1)
+    app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
+    logger.info("Using PostgreSQL database")
+else:
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///trading.db'
+    logger.info("Using SQLite database")
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
@@ -314,7 +326,7 @@ def is_in_trading_window():
 # Routes
 @app.route('/')
 def home():
-    return render_template('dashboard.html')
+    return redirect(url_for('dashboard'))
 
 @app.route('/dashboard')
 def dashboard():
@@ -500,4 +512,5 @@ if __name__ == '__main__':
     start_periodic_tasks()
     
     # Démarrer le serveur Flask
-    app.run(host='0.0.0.0', port=5000, use_reloader=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, use_reloader=False)
