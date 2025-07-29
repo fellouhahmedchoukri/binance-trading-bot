@@ -1,16 +1,26 @@
 import sqlite3
 from datetime import datetime, timedelta
-import json
+import threading
 import logging
 
 class PositionManager:
     def __init__(self, db_path='positions.db'):
-        self.conn = sqlite3.connect(db_path)
-        self.create_tables()
+        self.db_path = db_path
+        self.local = threading.local()
         self.logger = logging.getLogger(__name__)
+        self.initialize_db()
     
-    def create_tables(self):
-        cursor = self.conn.cursor()
+    def get_connection(self):
+        """Retourne une connexion à la base de données pour le thread courant"""
+        if not hasattr(self.local, 'conn') or not self.local.conn:
+            self.local.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.local.conn.execute("PRAGMA journal_mode=WAL")
+        return self.local.conn
+    
+    def initialize_db(self):
+        """Initialisation de la base de données dans le thread principal"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS positions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,19 +42,22 @@ class PositionManager:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        self.conn.commit()
+        conn.commit()
+        conn.close()
     
     # Positions management
     def add_position(self, symbol, entry_price, quantity, order_id=None):
-        cursor = self.conn.cursor()
+        conn = self.get_connection()
+        cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO positions (symbol, entry_price, quantity, order_id)
             VALUES (?, ?, ?, ?)
         ''', (symbol, entry_price, quantity, order_id))
-        self.conn.commit()
+        conn.commit()
     
     def get_positions(self, symbol):
-        cursor = self.conn.cursor()
+        conn = self.get_connection()
+        cursor = conn.cursor()
         cursor.execute('''
             SELECT id, symbol, entry_price, quantity, order_id, timestamp
             FROM positions
@@ -58,6 +71,13 @@ class PositionManager:
             'order_id': row[4],
             'timestamp': row[5]
         } for row in cursor.fetchall()]
+    
+    # ... (le reste des méthodes reste inchangé, mais utilise toujours get_connection())
+    
+    def __del__(self):
+        """Ferme les connexions à la destruction"""
+        if hasattr(self.local, 'conn') and self.local.conn:
+            self.local.conn.close()
     
     def get_symbols(self):
         cursor = self.conn.cursor()
