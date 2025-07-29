@@ -115,7 +115,7 @@ class BinanceAPI:
         
         lot_size = next(f for f in info['filters'] if f['filterType'] == 'LOT_SIZE')
         step_size = float(lot_size['stepSize'])
-        precision = int(round(-math.log(step_size, 10), 0)
+        precision = int(round(-math.log(step_size, 10), 0))
         return round(quantity, precision)
     
     def format_price(self, symbol, price):
@@ -126,5 +126,5 @@ class BinanceAPI:
         
         price_filter = next(f for f in info['filters'] if f['filterType'] == 'PRICE_FILTER')
         tick_size = float(price_filter['tickSize'])
-        precision = int(round(-math.log(tick_size, 10), 0)
+        precision = int(round(-math.log(tick_size, 10), 0))
         return round(price, precision)
