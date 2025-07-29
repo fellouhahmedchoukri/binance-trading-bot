@@ -23,6 +23,7 @@ logger.info(f"Configuration TESTNET: {config.TESTNET}")
 try:
     binance = BinanceAPI(config.API_KEY, config.SECRET_KEY, testnet=config.TESTNET)
     logger.info(f"Binance API initialized successfully for {'TESTNET' if config.TESTNET else 'MAINNET'}")
+    logger.info(f"Binance API URL: {binance.client.base_url}")
 except Exception as e:
     logger.error(f"Failed to initialize BinanceAPI: {e}")
     raise e
