@@ -1,171 +1,116 @@
-import sqlite3
-from datetime import datetime, timedelta
-import threading
-import logging
+import time
 
 class PositionManager:
-    def __init__(self, db_path='positions.db'):
-        self.db_path = db_path
-        self.local = threading.local()
-        self.logger = logging.getLogger(__name__)
-        self.initialize_db()
-    
-    def get_connection(self):
-        """Retourne une connexion à la base de données pour le thread courant"""
-        if not hasattr(self.local, 'conn') or not self.local.conn:
-            self.local.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-            self.local.conn.execute("PRAGMA journal_mode=WAL")
-        return self.local.conn
-    
-    def initialize_db(self):
-        """Initialisation de la base de données dans le thread principal"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS positions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL,
-                entry_price REAL NOT NULL,
-                quantity REAL NOT NULL,
-                order_id TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS pending_orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL,
-                order_id TEXT NOT NULL UNIQUE,
-                side TEXT NOT NULL,
-                price REAL NOT NULL,
-                quantity REAL NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.commit()
-        conn.close()
-    
-    # Positions management
-    def add_position(self, symbol, entry_price, quantity, order_id=None):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO positions (symbol, entry_price, quantity, order_id)
-            VALUES (?, ?, ?, ?)
-        ''', (symbol, entry_price, quantity, order_id))
-        conn.commit()
-    
-    def get_positions(self, symbol):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT id, symbol, entry_price, quantity, order_id, timestamp
-            FROM positions
-            WHERE symbol = ?
-        ''', (symbol,))
-        return [{
-            'id': row[0],
-            'symbol': row[1],
-            'entry_price': row[2],
-            'quantity': row[3],
-            'order_id': row[4],
-            'timestamp': row[5]
-        } for row in cursor.fetchall()]
-    
+    def __init__(self):
+        self.positions = {}
+        self.pending_orders = []
+        self.last_sync = 0
+
+    def sync_with_exchange(self, binance_api):
+        """Synchroniser les positions avec Binance"""
+        if time.time() - self.last_sync < 60:  # Synchroniser max 1x/min
+            return
+            
+        self.last_sync = time.time()
+        symbols = list(self.positions.keys()) + [order['symbol'] for order in self.pending_orders]
+        
+        for symbol in set(symbols):
+            real_positions = binance_api.get_open_positions(symbol)
+            
+            # Mettre à jour les positions
+            self.positions[symbol] = real_positions
+            
+            # Nettoyer les ordres en attente remplis
+            for order in self.pending_orders[:]:
+                status = binance_api.get_order_status(symbol, order['order_id'])
+                if status == 'FILLED':
+                    self.add_position(
+                        symbol,
+                        order['price'],
+                        order['quantity'],
+                        order['order_id']
+                    )
+                    self.pending_orders.remove(order)
+                elif status in ['CANCELED', 'EXPIRED', 'REJECTED']:
+                    self.pending_orders.remove(order)
+
+    def add_position(self, symbol, entry_price, quantity, order_id):
+        """Ajouter une nouvelle position"""
+        if symbol not in self.positions:
+            self.positions[symbol] = []
+            
+        self.positions[symbol].append({
+            'entry_price': entry_price,
+            'quantity': quantity,
+            'order_id': order_id,
+            'timestamp': time.time()
+        })
+
+    def remove_all_positions(self, symbol):
+        """Supprimer toutes les positions d'un symbole"""
+        if symbol in self.positions:
+            del self.positions[symbol]
+
+    def calculate_avg_price(self, symbol):
+        """Calculer le prix moyen d'entrée"""
+        if symbol not in self.positions or not self.positions[symbol]:
+            return None
+            
+        total_value = 0
+        total_quantity = 0
+        
+        for position in self.positions[symbol]:
+            total_value += position['entry_price'] * position['quantity']
+            total_quantity += position['quantity']
+            
+        return total_value / total_quantity if total_quantity > 0 else 0
+
+    def get_unrealized_profit(self, symbol, current_price):
+        """Calculer le profit non réalisé"""
+        avg_price = self.calculate_avg_price(symbol)
+        if avg_price is None:
+            return 0
+            
+        total_quantity = sum(p['quantity'] for p in self.positions[symbol])
+        return (current_price - avg_price) * total_quantity
+
+    def add_pending_order(self, symbol, order_id, side, price, quantity):
+        """Ajouter un ordre en attente"""
+        self.pending_orders.append({
+            'symbol': symbol,
+            'order_id': order_id,
+            'side': side,
+            'price': price,
+            'quantity': quantity,
+            'timestamp': time.time()
+        })
+
+    def remove_pending_order(self, order_id):
+        """Supprimer un ordre en attente"""
+        self.pending_orders = [o for o in self.pending_orders if o['order_id'] != order_id]
+
+    def is_order_old(self, order_id, minutes=5):
+        """Vérifier si un ordre est trop ancien"""
+        for order in self.pending_orders:
+            if order['order_id'] == order_id:
+                return time.time() - order['timestamp'] > minutes * 60
+        return False
+
     def get_symbols(self):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT DISTINCT symbol FROM positions')
-        return [row[0] for row in cursor.fetchall()]
-    
+        """Obtenir tous les symboles avec positions"""
+        return list(self.positions.keys())
+
+    def get_positions(self, symbol):
+        """Obtenir les positions pour un symbole"""
+        return self.positions.get(symbol, [])
+
+    def get_pending_orders(self):
+        """Obtenir tous les ordres en attente"""
+        return self.pending_orders.copy()
+
     def get_last_entry_price(self, symbol):
+        """Obtenir le dernier prix d'entrée"""
         positions = self.get_positions(symbol)
         if not positions:
             return None
-        return max(positions, key=lambda x: x['timestamp'])['entry_price']
-    
-    def calculate_avg_price(self, symbol):
-        positions = self.get_positions(symbol)
-        if not positions:
-            return 0.0
-        
-        total_qty = sum(p['quantity'] for p in positions)
-        total_value = sum(p['entry_price'] * p['quantity'] for p in positions)
-        return total_value / total_qty
-    
-    def remove_position(self, position_id):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM positions WHERE id = ?', (position_id,))
-        conn.commit()
-    
-    def remove_all_positions(self, symbol):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM positions WHERE symbol = ?', (symbol,))
-        conn.commit()
-    
-    # Pending orders management
-    def add_pending_order(self, symbol, order_id, side, price, quantity):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute('''
-                INSERT INTO pending_orders (symbol, order_id, side, price, quantity)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (symbol, order_id, side, price, quantity))
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            self.logger.warning(f"Duplicate order ID: {order_id}")
-            return False
-    
-    def get_pending_orders(self, symbol=None):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        if symbol:
-            cursor.execute('''
-                SELECT id, symbol, order_id, side, price, quantity, created_at
-                FROM pending_orders
-                WHERE symbol = ?
-            ''', (symbol,))
-        else:
-            cursor.execute('''
-                SELECT id, symbol, order_id, side, price, quantity, created_at
-                FROM pending_orders
-            ''')
-        
-        return [{
-            'id': row[0],
-            'symbol': row[1],
-            'order_id': row[2],
-            'side': row[3],
-            'price': row[4],
-            'quantity': row[5],
-            'created_at': row[6]
-        } for row in cursor.fetchall()]
-    
-    def remove_pending_order(self, order_id):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM pending_orders WHERE order_id = ?', (order_id,))
-        conn.commit()
-    
-    def is_order_old(self, order_id, minutes=5):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT created_at FROM pending_orders WHERE order_id = ?
-        ''', (order_id,))
-        result = cursor.fetchone()
-        
-        if not result:
-            return False
-        
-        created_at = datetime.strptime(result[0], '%Y-%m-%d %H:%M:%S')
-        return datetime.now() - created_at > timedelta(minutes=minutes)
-    
-    def __del__(self):
-        """Ferme les connexions à la destruction"""
-        if hasattr(self.local, 'conn') and self.local.conn:
-            self.local.conn.close()
+        return positions[-1]['entry_price']
