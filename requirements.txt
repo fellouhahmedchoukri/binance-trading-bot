@@ -4,3 +4,4 @@ flask_migrate
 python-dotenv
 binance-connector
 gunicorn
+psycopg2-binary  # Pour PostgreSQL sur Railway
