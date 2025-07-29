@@ -14,18 +14,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ... [début du fichier] ...
 app = Flask(__name__)
 config = Config()
 
 # TEST: Vérifier la configuration
-print(f"Configuration TESTNET: {config.TESTNET}")
+logger.info(f"Configuration TESTNET: {config.TESTNET}")
 
-binance = BinanceAPI(config.API_KEY, config.SECRET_KEY, testnet=config.TESTNET)
-# ... [suite du fichier] ...
+try:
+    binance = BinanceAPI(config.API_KEY, config.SECRET_KEY, testnet=config.TESTNET)
+    logger.info(f"Binance API initialized successfully for {'TESTNET' if config.TESTNET else 'MAINNET'}")
+except Exception as e:
+    logger.error(f"Failed to initialize BinanceAPI: {e}")
+    raise e
 
 # Initialisation du PositionManager dans le thread principal
 position_manager = PositionManager()
+logger.info("PositionManager initialized")
 
 # Démarrer les tâches périodiques
 def start_periodic_tasks():
@@ -36,12 +40,147 @@ def start_periodic_tasks():
                 monitor_pending_orders()
             except Exception as e:
                 logger.error(f"Periodic task error: {e}")
-            time.sleep(60)
+            time.sleep(60)  # Vérifier toutes les minutes
     
     thread = threading.Thread(target=monitor_targets, daemon=True)
     thread.start()
+    logger.info("Periodic tasks started")
 
-# ... [les autres fonctions restent inchangées] ...
+def check_profit_targets():
+    """Vérifie si les positions atteignent le profit target"""
+    for symbol in position_manager.get_symbols():
+        try:
+            current_price = binance.get_current_price(symbol)
+            positions = position_manager.get_positions(symbol)
+            
+            if not positions:
+                continue
+                
+            avg_price = position_manager.calculate_avg_price(symbol)
+            profit_target = avg_price * (1 + config.PROFIT_PERCENT / 100)
+            
+            logger.info(f"Checking profit for {symbol}: "
+                        f"Current: {current_price}, Target: {profit_target}")
+            
+            if current_price >= profit_target:
+                total_quantity = sum(p['quantity'] for p in positions)
+                
+                # Fermer toute la position
+                order = binance.place_limit_order(
+                    symbol=symbol,
+                    side='SELL',
+                    quantity=total_quantity,
+                    price=profit_target
+                )
+                
+                if order:
+                    logger.info(f"Closed all positions for {symbol} at {profit_target}")
+                    position_manager.remove_all_positions(symbol)
+        except Exception as e:
+            logger.error(f"Error in profit check for {symbol}: {e}")
+
+def monitor_pending_orders():
+    """Vérifie et met à jour les ordres en attente"""
+    try:
+        orders = position_manager.get_pending_orders()
+        logger.info(f"Monitoring {len(orders)} pending orders")
+        
+        for order in orders:
+            symbol = order['symbol']
+            order_id = order['order_id']
+            
+            # Vérifier l'état de l'ordre
+            status = binance.get_order_status(symbol, order_id)
+            logger.info(f"Order {order_id} status: {status}")
+            
+            if status == 'FILLED':
+                # Ajouter à la position
+                position_manager.add_position(
+                    symbol=symbol,
+                    entry_price=order['price'],
+                    quantity=order['quantity'],
+                    order_id=order_id
+                )
+                position_manager.remove_pending_order(order_id)
+            elif status in ['CANCELED', 'EXPIRED']:
+                position_manager.remove_pending_order(order_id)
+            elif status == 'NEW':
+                # Vérifier si l'ordre est trop ancien (>5min)
+                if position_manager.is_order_old(order_id, minutes=5):
+                    binance.cancel_order(symbol, order_id)
+                    position_manager.remove_pending_order(order_id)
+                    
+                    # Recalculer nouveau prix d'entrée
+                    last_entry = position_manager.get_last_entry_price(symbol) or binance.get_current_price(symbol)
+                    new_price = last_entry * (1 - config.BELOW_PERCENT / 100) * 0.998
+                    
+                    quantity = calculate_quantity(
+                        price=new_price,
+                        order_value=config.ORDER_VALUE,
+                        min_movement=config.MIN_MOVEMENT,
+                        decimals=config.ROUNDING
+                    )
+                    
+                    # Replacer l'ordre
+                    new_order = binance.place_limit_order(
+                        symbol=symbol,
+                        side='BUY',
+                        quantity=quantity,
+                        price=new_price
+                    )
+                    
+                    if new_order:
+                        position_manager.add_pending_order(
+                            symbol=symbol,
+                            order_id=new_order['orderId'],
+                            side='BUY',
+                            price=new_price,
+                            quantity=quantity
+                        )
+    except Exception as e:
+        logger.error(f"Error in order monitoring: {e}")
+
+def calculate_quantity(price, order_value, min_movement, decimals):
+    """Calcule la quantité selon les règles de la stratégie"""
+    raw_qty = order_value / price
+    rounded = round(raw_qty, decimals)
+    return rounded + min_movement if rounded >= raw_qty else rounded + (min_movement * 2)
+
+def can_open_new_position(symbol):
+    """Vérifie si on peut ouvrir une nouvelle position"""
+    try:
+        equity = binance.get_equity()
+        current_price = binance.get_current_price(symbol)
+        min_qty = config.ORDER_VALUE / current_price
+        pir = equity / (min_qty * current_price)
+        current_orders = len(position_manager.get_positions(symbol))
+        
+        logger.info(f"Can open new position for {symbol}: "
+                   f"Equity: {equity}, PIR: {pir}, "
+                   f"Current orders: {current_orders}, Max orders: {config.MAX_ORDERS}")
+        
+        # Mode debug: désactiver la limite d'ordres
+        if os.getenv('DISABLE_MAX_ORDERS_CHECK') == 'true':
+            return True
+            
+        return current_orders < min(pir, config.MAX_ORDERS)
+    except Exception as e:
+        logger.error(f"Error in can_open_new_position: {e}")
+        return False
+
+def is_in_trading_window():
+    """Vérifie si on est dans la fenêtre temporelle"""
+    try:
+        # Mode debug: désactiver la fenêtre temporelle
+        if os.getenv('DISABLE_TIMEWINDOW') == 'true':
+            return True
+            
+        now = time.time()
+        start_time = config.get_start_timestamp()
+        return now >= start_time
+    except Exception as e:
+        logger.error(f"Error in is_in_trading_window: {e}")
+        return False
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -107,11 +246,14 @@ def webhook():
                     
                     # TEST: Vérifier l'ordre sur Binance
                     if config.TESTNET:
-                        order_status = binance.client.get_order(
-                            symbol=symbol,
-                            orderId=order['orderId']
-                        )
-                        logger.info(f"Testnet order status: {order_status}")
+                        try:
+                            order_status = binance.client.get_order(
+                                symbol=symbol,
+                                orderId=order['orderId']
+                            )
+                            logger.info(f"Testnet order status: {order_status}")
+                        except Exception as e:
+                            logger.error(f"Failed to get order status: {e}")
                     
                     return jsonify({"status": "success", "order_id": order['orderId']})
         
