@@ -14,9 +14,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ... [début du fichier] ...
 app = Flask(__name__)
 config = Config()
+
+# TEST: Vérifier la configuration
+print(f"Configuration TESTNET: {config.TESTNET}")
+
 binance = BinanceAPI(config.API_KEY, config.SECRET_KEY, testnet=config.TESTNET)
+# ... [suite du fichier] ...
 
 # Initialisation du PositionManager dans le thread principal
 position_manager = PositionManager()
