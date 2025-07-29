@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, redirect, url_for, current_app
+from flask import Flask, request, jsonify, render_template, redirect, url_for
 from binance_api import BinanceAPI
 from position_manager import PositionManager
 from config import Config
@@ -36,30 +36,28 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 
-# Modèles de base de données
-class TradingSnapshot(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    equity = db.Column(db.Float)
-    net_profit = db.Column(db.Float)
-    open_positions = db.Column(db.Integer)
-    pending_orders = db.Column(db.Integer)
-    btc_price = db.Column(db.Float)
-    
-    def __repr__(self):
-        return f'<Snapshot {self.timestamp}>'
+# Configuration et initialisation du bot
+config = Config()
 
-class TradeHistory(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    symbol = db.Column(db.String(10))
-    side = db.Column(db.String(10))
-    quantity = db.Column(db.Float)
-    price = db.Column(db.Float)
-    status = db.Column(db.String(20))
-    
-    def __repr__(self):
-        return f'<Trade {self.symbol} {self.side} {self.quantity}>'
+# TEST: Vérifier la configuration
+logger.info(f"Configuration TESTNET: {config.TESTNET}")
+
+try:
+    binance = BinanceAPI(config.API_KEY, config.SECRET_KEY, testnet=config.TESTNET)
+    logger.info(f"Binance API initialized successfully for {'TESTNET' if config.TESTNET else 'MAINNET'}")
+    logger.info(f"Binance API URL: {binance.client.base_url}")
+except Exception as e:
+    logger.error(f"Failed to initialize BinanceAPI: {e}")
+    raise e
+
+# Initialisation du PositionManager
+position_manager = PositionManager()
+logger.info("PositionManager initialized")
+
+# Création de la base de données
+with app.app_context():
+    db.create_all()
+    logger.info("Database initialized")
 
 # Fonctions utilitaires
 def save_snapshot(binance, position_manager):
@@ -112,29 +110,6 @@ def log_trade(symbol, side, quantity, price, status):
         logger.error(f"Error logging trade: {e}")
         db.session.rollback()
         return False
-
-# Configuration et initialisation du bot
-config = Config()
-
-# TEST: Vérifier la configuration
-logger.info(f"Configuration TESTNET: {config.TESTNET}")
-
-try:
-    binance = BinanceAPI(config.API_KEY, config.SECRET_KEY, testnet=config.TESTNET)
-    logger.info(f"Binance API initialized successfully for {'TESTNET' if config.TESTNET else 'MAINNET'}")
-    logger.info(f"Binance API URL: {binance.client.base_url}")
-except Exception as e:
-    logger.error(f"Failed to initialize BinanceAPI: {e}")
-    raise e
-
-# Initialisation du PositionManager
-position_manager = PositionManager()
-logger.info("PositionManager initialized")
-
-# Création de la base de données
-with app.app_context():
-    db.create_all()
-    logger.info("Database initialized")
 
 # Démarrer les tâches périodiques
 def start_periodic_tasks():
