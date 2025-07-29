@@ -33,7 +33,6 @@ class BinanceAPI:
     def get_equity(self):
         """Solde total du compte en USDT"""
         balances = self.client.account()['balances']
-        # CORRECTION: Parenthèse manquante ajoutée ici
         usdt_balance = next(
             (float(b['free']) + float(b['locked']) for b in balances if b['asset'] == 'USDT'
         ), 0.0)
@@ -41,47 +40,54 @@ class BinanceAPI:
 
     def get_net_profit(self):
         """Profit net total (implémentation simplifiée)"""
-        trades = self.client.my_trades(symbol='BTCUSDT', limit=1000)
-        total_profit = 0.0
-        for trade in trades:
-            if 'realizedPnl' in trade:
-                total_profit += float(trade['realizedPnl'])
-        return total_profit
+        try:
+            trades = self.client.my_trades(symbol='BTCUSDT', limit=1000)
+            total_profit = 0.0
+            for trade in trades:
+                if 'realizedPnl' in trade:
+                    total_profit += float(trade['realizedPnl'])
+            return total_profit
+        except Exception as e:
+            print(f"Error getting net profit: {e}")
+            return 0.0
 
     def get_open_positions(self, symbol):
         """Positions ouvertes réelles depuis Binance"""
         positions = []
-        orders = self.client.get_orders(symbol=symbol, limit=100)
-        
-        for order in orders:
-            if order['status'] == 'FILLED' and order['side'] == 'BUY':
-                positions.append({
-                    'symbol': symbol,
-                    'entry_price': float(order['price']),
-                    'quantity': float(order['executedQty']),
-                    'order_id': order['orderId']
-                })
+        try:
+            orders = self.client.get_orders(symbol=symbol, limit=100)
+            
+            for order in orders:
+                if order['status'] == 'FILLED' and order['side'] == 'BUY':
+                    positions.append({
+                        'symbol': symbol,
+                        'entry_price': float(order['price']),
+                        'quantity': float(order['executedQty']),
+                        'order_id': order['orderId']
+                    })
+        except Exception as e:
+            print(f"Error getting open positions: {e}")
         return positions
 
     def place_limit_order(self, symbol, side, quantity, price):
         """Passer un ordre limite avec validation des règles"""
-        symbol_info = self.get_symbol_info(symbol)
-        if not symbol_info:
-            return None
-
-        # Validation du prix
-        price_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER')
-        tick_size = float(price_filter['tickSize'])
-        price = round(price / tick_size) * tick_size
-
-        # Validation de la quantité
-        lot_size = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
-        min_qty = float(lot_size['minQty'])
-        step_size = float(lot_size['stepSize'])
-        quantity = max(min_qty, quantity)
-        quantity = round(quantity / step_size) * step_size
-
         try:
+            symbol_info = self.get_symbol_info(symbol)
+            if not symbol_info:
+                return None
+
+            # Validation du prix
+            price_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER')
+            tick_size = float(price_filter['tickSize'])
+            price = round(price / tick_size) * tick_size
+
+            # Validation de la quantité
+            lot_size = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
+            min_qty = float(lot_size['minQty'])
+            step_size = float(lot_size['stepSize'])
+            quantity = max(min_qty, quantity)
+            quantity = round(quantity / step_size) * step_size
+
             order = self.client.new_order(
                 symbol=symbol,
                 side=side,
@@ -94,21 +100,24 @@ class BinanceAPI:
         except ClientError as e:
             print(f"Order placement failed: {e.error_message}")
             return None
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            return None
 
     def place_market_order(self, symbol, side, quantity):
         """Passer un ordre au marché"""
-        symbol_info = self.get_symbol_info(symbol)
-        if not symbol_info:
-            return None
-
-        # Validation de la quantité
-        lot_size = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
-        min_qty = float(lot_size['minQty'])
-        step_size = float(lot_size['stepSize'])
-        quantity = max(min_qty, quantity)
-        quantity = round(quantity / step_size) * step_size
-
         try:
+            symbol_info = self.get_symbol_info(symbol)
+            if not symbol_info:
+                return None
+
+            # Validation de la quantité
+            lot_size = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
+            min_qty = float(lot_size['minQty'])
+            step_size = float(lot_size['stepSize'])
+            quantity = max(min_qty, quantity)
+            quantity = round(quantity / step_size) * step_size
+
             order = self.client.new_order(
                 symbol=symbol,
                 side=side,
@@ -118,6 +127,9 @@ class BinanceAPI:
             return order
         except ClientError as e:
             print(f"Market order failed: {e.error_message}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error: {e}")
             return None
 
     def get_order_status(self, symbol, order_id):
