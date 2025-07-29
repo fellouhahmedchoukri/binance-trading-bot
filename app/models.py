@@ -1,26 +1,26 @@
 from datetime import datetime
-from main import db
+from main import db  # Import depuis main
 
-class Snapshot(db.Model):
+class TradingSnapshot(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    total_balance = db.Column(db.Float)
-    available_balance = db.Column(db.Float)
-    positions_count = db.Column(db.Integer)
+    equity = db.Column(db.Float)
+    net_profit = db.Column(db.Float)
+    open_positions = db.Column(db.Integer)
+    pending_orders = db.Column(db.Integer)
+    btc_price = db.Column(db.Float)
+    
+    def __repr__(self):
+        return f'<Snapshot {self.timestamp}>'
 
-class Trade(db.Model):
+class TradeHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    symbol = db.Column(db.String(20))
+    symbol = db.Column(db.String(10))
     side = db.Column(db.String(10))
     quantity = db.Column(db.Float)
     price = db.Column(db.Float)
     status = db.Column(db.String(20))
-
-class Position(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    symbol = db.Column(db.String(20))
-    entry_price = db.Column(db.Float)
-    quantity = db.Column(db.Float)
-    side = db.Column(db.String(10))
-    status = db.Column(db.String(20), default='OPEN')
+    
+    def __repr__(self):
+        return f'<Trade {self.symbol} {self.side} {self.quantity}>'
