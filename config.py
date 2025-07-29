@@ -6,6 +6,7 @@ class Config:
         # Binance API
         self.API_KEY = os.getenv('BINANCE_API_KEY', 'your_api_key')
         self.SECRET_KEY = os.getenv('BINANCE_SECRET_KEY', 'your_secret_key')
+        self.TESTNET = os.getenv('TESTNET_MODE', 'true').lower() == 'true'
         
         # Strategy parameters (éditables)
         self.ORDER_VALUE = float(os.getenv('ORDER_VALUE', 10.0))  # en USDT
