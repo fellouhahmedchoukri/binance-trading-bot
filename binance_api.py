@@ -4,9 +4,23 @@ import logging
 import math
 
 class BinanceAPI:
-    def __init__(self, api_key, api_secret):
-        self.client = Client(api_key, api_secret)
+    def __init__(self, api_key, api_secret, testnet=True):
+        """Initialise la connexion à l'API Binance.
+        
+        Args:
+            api_key (str): Clé API Binance
+            api_secret (str): Clé secrète Binance
+            testnet (bool): Utiliser le testnet (True par défaut)
+        """
+        self.testnet = testnet
         self.logger = logging.getLogger(__name__)
+        
+        if testnet:
+            self.logger.info("Initializing Binance TESTNET API")
+            self.client = Client(api_key, api_secret, testnet=True)
+        else:
+            self.logger.info("Initializing Binance MAINNET API")
+            self.client = Client(api_key, api_secret)
     
     def place_limit_order(self, symbol, side, quantity, price):
         try:
@@ -23,8 +37,6 @@ class BinanceAPI:
         except BinanceAPIException as e:
             self.logger.error(f"Order failed: {e}")
             return None
-    
-    # Le reste du code reste inchangé...
     
     def cancel_order(self, symbol, order_id):
         try:
@@ -103,7 +115,7 @@ class BinanceAPI:
         
         lot_size = next(f for f in info['filters'] if f['filterType'] == 'LOT_SIZE')
         step_size = float(lot_size['stepSize'])
-        precision = int(round(-math.log(step_size, 10), 0))
+        precision = int(round(-math.log(step_size, 10), 0)
         return round(quantity, precision)
     
     def format_price(self, symbol, price):
@@ -114,5 +126,5 @@ class BinanceAPI:
         
         price_filter = next(f for f in info['filters'] if f['filterType'] == 'PRICE_FILTER')
         tick_size = float(price_filter['tickSize'])
-        precision = int(round(-math.log(tick_size, 10), 0))
+        precision = int(round(-math.log(tick_size, 10), 0)
         return round(price, precision)
