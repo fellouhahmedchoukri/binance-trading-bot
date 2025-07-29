@@ -41,7 +41,7 @@ def start_periodic_tasks():
                 position_manager.sync_with_exchange(binance)
             except Exception as e:
                 logger.error(f"Periodic task error: {e}")
-            time.sleep(60)  # Vérifier toutes les minutes
+            time.sleep(60)
     
     thread = threading.Thread(target=monitor_targets, daemon=True)
     thread.start()
@@ -64,7 +64,7 @@ def check_exit_conditions():
                         f"Current: {current_price}, Target: {profit_target}, "
                         f"Unrealized P&L: {unrealized_profit}")
             
-            # Condition exacte de TradingView : profit > 0 et prix > target
+            # Condition exacte de TradingView
             if unrealized_profit > 0 and current_price >= profit_target:
                 total_quantity = sum(p['quantity'] for p in positions)
                 order = binance.place_market_order(
@@ -137,9 +137,13 @@ def monitor_pending_orders():
 
 def calculate_quantity(price, order_value, min_movement, decimals):
     """Calcule la quantité selon les règles de la stratégie"""
-    raw_qty = order_value / price
-    rounded = round(raw_qty, decimals)
-    return rounded + min_movement if rounded >= raw_qty else rounded + (min_movement * 2)
+    try:
+        raw_qty = order_value / price
+        rounded = round(raw_qty, decimals)
+        return rounded + min_movement if rounded >= raw_qty else rounded + (min_movement * 2)
+    except Exception as e:
+        logger.error(f"Quantity calculation error: {e}")
+        return 0
 
 def calculate_pir(symbol):
     """Calcul exact du PIR comme dans TradingView"""
