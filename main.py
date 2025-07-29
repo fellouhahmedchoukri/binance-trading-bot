@@ -131,8 +131,13 @@ def is_in_trading_window():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.json
-        logger.info(f"Received signal: {data}")
+        # ... [code existant]
+        
+        logger.info(f"Debug info:")
+        logger.info(f"- Trading window: {is_in_trading_window()}")
+        logger.info(f"- Last entry: {position_manager.get_last_entry_price(symbol)}")
+        logger.info(f"- Can open new position: {can_open_new_position(symbol)}")
+        logger.info(f"- Signal price: {signal_price} vs Next price: {next_price}")
         
         if data['action'] == 'buy' and is_in_trading_window():
             symbol = data['symbol']
