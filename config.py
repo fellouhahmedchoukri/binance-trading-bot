@@ -14,5 +14,5 @@ class Config:
         self.MAX_ORDERS = int(os.getenv('MAX_ORDERS', '5'))
         
     def get_start_timestamp(self):
-        # Implémentation simplifiée pour l'exemple
+        # Implémentation simplifiée
         return time.time() - 3600  # 1 heure dans le passé
